@@ -4,11 +4,12 @@
 import contextlib
 import io
 import random as rnd
+import time
 
 import pandas as pd
 import streamlit as st
 
-from db.user import add_personal_word, delete_personal_word
+from db.user import add_personal_word, delete_personal_word, get_user_words, get_personal_words
 from db.user import get_statistics, update_stats, render_schema
 
 from streamlit.runtime.scriptrunner_utils.exceptions import RerunException
@@ -58,8 +59,8 @@ def generate_options(correct_word, all_words):
     needed = 3 - len(options_pool)
     if needed > 0:
         options_pool += dummy_words[:needed]
-    random_options = rnd.sample(options_pool, 3)
-    options = random_options + [correct_word]
+    options = rnd.sample(options_pool, 3)
+    options.append(correct_word)
     rnd.shuffle(options)
     return options
 
@@ -82,160 +83,202 @@ def capture_render_schema():
 # ОСНОВНЫЕ ФУНКЦИИ
 # ============================================================
 # Главная страница
-def render_study_tab(words):
+def render_study_tab():
     """
     TODO: Реализовать вкладку изучения слов
     - Отображение текущего слова на русском
     - 4 кнопки с вариантами перевода
     - Обработка правильных/неправильных ответов
     - Кнопка следующего слова
+    - Каждая порция - 4 случайных слова,
+    новые порции загружаются после прохождения текущей.
     """
-    if 'current_index' not in st.session_state:
+
+    if 'current_batch' not in st.session_state:
+        st.session_state.current_batch = (
+            get_user_words(st.session_state.user_id)
+        )
         st.session_state.current_index = 0
-        st.session_state.score = 0
         st.session_state.options = []
         st.session_state.correct_answers = 0
         st.session_state.wrong_answers = 0
 
-    if not words:
+    batch = st.session_state.current_batch
+    if not batch:
         st.warning("Ваша база слов пуста. "
                    "Добавьте слова на вкладке '➕ Добавить слово'.")
         return
 
+    if st.session_state.current_index >= len(batch):
+        st.session_state.current_index = 0
+
     current_index = st.session_state.current_index
-    current_word_dict = words[current_index]
-    original_word = current_word_dict.get('russian_word')
-    correct_translation = current_word_dict.get('english_word')
-    word_id = current_word_dict.get('id')
-    word_type = current_word_dict.get('word_type')
+    current_word = batch[current_index]
+    russian_word = current_word['russian_word']
+    correct_english = current_word['english_word']
+    word_id = current_word['id']
+    word_type = current_word['word_type']
 
     if not st.session_state.options:
-        st.session_state.options = generate_options(correct_translation, words)
+        st.session_state.options = generate_options(correct_english, batch)
+
     options = st.session_state.options
 
-    st.markdown(f"### 📖 Изучаем слова **{current_index + 1}** из {len(words)}")
-    st.subheader(f"Как будет по-английски слово: **{original_word}**?")
+    st.markdown(f"### 📖 Изучаем слово {current_index + 1} "
+                f"из {len(batch)} в текущем блоке")
+    st.subheader(f"Как будет по-английски слово: **{russian_word}**?")
 
-    with st.form(key="answer_form"):
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            submit1 = st.form_submit_button(options[0], key="button_1")
-        with col2:
-            submit2 = st.form_submit_button(options[1], key="button_2")
-        with col3:
-            submit3 = st.form_submit_button(options[2], key="button_3")
-        with col4:
-            submit4 = st.form_submit_button(options[3], key="button_4")
+    with st.form(key="study_form"):
+        cols = st.columns(4)
+        buttons = []
+        for i, opt in enumerate(options):
+            with cols[i]:
+                buttons.append(st.form_submit_button(opt, key=f"opt_{i}"))
+        skip = st.form_submit_button("⏩ Пропустить слово", type="secondary")
 
-        st.info("Если выбрали ПРАВИЛЬНЫЙ ответ, "
-                "для перехода к следующему слову нажмите кнопку ниже ⬇️")
+    # Обработка выбора пользователя
+    user_choice = None
+    for i, btn in enumerate(buttons):
+        if btn:
+            user_choice = options[i]
+            break
 
-        submitted = st.form_submit_button("Следующее слово", type="secondary")
-
-    if submitted or any([submit1, submit2, submit3, submit4]):
-        user_choice = None
-        if submit1:
-            user_choice = options[0]
-        if submit2:
-            user_choice = options[1]
-        if submit3:
-            user_choice = options[2]
-        if submit4:
-            user_choice = options[3]
-
-        if user_choice is not None and st.session_state.user_id:
-            if user_choice == correct_translation:
-                st.success("✅ Верно!")
-                st.info(f"Слово **{original_word}** переводится как"
-                        f" **{correct_translation}**")
-                st.session_state.correct_answers += 1
-                st.balloons()
-                update_stats(
-                    user_id=st.session_state.user_id,
-                    word_id=word_id,
-                    word_type=word_type,
-                    is_correct=True
-                )
-
-                if current_index < len(words) - 1:
-                    st.session_state.current_index += 1
-                else:
-                    st.info("Вы закончили все слова! Можем начать снова.")
-                    st.session_state.current_index = 0
-
+    if user_choice is not None:
+        # Выбран вариант ответа
+        if user_choice == correct_english:
+            st.success("✅ Верно!")
+            st.session_state.correct_answers += 1
+            update_stats(
+                user_id=st.session_state.user_id,
+                word_id=word_id,
+                word_type=word_type,
+                is_correct=True
+            )
+            st.balloons()
+            # Переход к следующему слову или новой порции
+            next_index = current_index + 1
+            if next_index < len(batch):
+                st.session_state.current_index = next_index
                 st.session_state.options = []
             else:
-                error_msg = "❌ Неверно. Попробуй еще раз!"
-                st.error(error_msg)
-                st.session_state.feedback = error_msg
-                st.session_state.wrong_answers += 1
-                update_stats(
-                    user_id=st.session_state.user_id,
-                    word_id=word_id,
-                    word_type=word_type,
-                    is_correct=False
+                st.info(
+                    "Поздравляем! Вы прошли текущий блок. "
+                    "Загружаем следующий..."
                 )
+                time.sleep(3)
+                st.session_state.current_batch = (
+                    get_user_words(st.session_state.user_id)
+                )
+                st.session_state.current_index = 0
+                st.session_state.options = []
+            st.rerun()
+        else:
+            st.error(f"❌ Неверно. Правильный ответ: {correct_english}")
+            st.session_state.wrong_answers += 1
+            update_stats(
+                user_id=st.session_state.user_id,
+                word_id=word_id,
+                word_type=word_type,
+                is_correct=False
+            )
+            # Остаёмся на том же слове, варианты не сбрасываем
+            st.rerun()
+    elif skip:
+        next_index = current_index + 1
+        if next_index < len(batch):
+            st.session_state.current_index = next_index
+            st.session_state.options = []
+        else:
+            st.session_state.current_batch = (
+                get_user_words(st.session_state.user_id)
+            )
+            st.session_state.current_index = 0
+            st.session_state.options = []
+        st.rerun()
 
-    st.divider()
-    st.subheader("Схема базы данных PostgreSQL")
-    show_schema = st.checkbox("Показать схему базы данных")
-    if show_schema:
-        st.info("Загрузка схемы... Подождите.")
-        try:
-            schema_text = capture_render_schema()
-            st.code(schema_text, language='text')
-            st.success("Готово!")
-        except Exception as e:
-            st.error(f"Произошла ошибка: {e}")
+    # Отображение текущей статистики сессии
+    st.metric(
+        "✅ Правильных ответов (сессия)",
+        st.session_state.correct_answers
+    )
+    st.metric(
+        "❌ Неправильных ответов (сессия)",
+        st.session_state.wrong_answers
+    )
 
 
 # Страница добавления слова
 def render_add_word_tab():
     """
-    TODO: Реализовать вкладку добавления слова
-    - Поле для ввода слова на русском
-    - Поле для ввода перевода
-    - Кнопка добавления
-    - Уведомление об успешном добавлении
+    Вкладка добавления персонального слова.
     """
-    st.info("Добавьте русское слово и его перевод на английский язык ➕  ")
+    st.info("Добавьте русское слово и его перевод на английский язык ➕")
 
-    if 'show_success' not in st.session_state:
-        st.session_state.show_success = False
+    # Отображение сохранённых сообщений (после rerun)
+    if st.session_state.get("add_success_msg"):
+        st.success(st.session_state.add_success_msg)
+        st.session_state.add_success_msg = None
+    if st.session_state.get("add_error_msg"):
+        st.error(st.session_state.add_error_msg)
+        st.session_state.add_error_msg = None
+
+    # Очистка полей по флагу (перед созданием виджетов)
+    if st.session_state.get("clear_add_form", False):
+        st.session_state.new_russian = ""
+        st.session_state.new_english = ""
+        st.session_state.clear_add_form = False
+
+    # Инициализация значений полей (если ещё нет)
+    if "new_russian" not in st.session_state:
+        st.session_state.new_russian = ""
+    if "new_english" not in st.session_state:
+        st.session_state.new_english = ""
 
     with st.form("add_word_form"):
-        russian_word = st.text_input("Русское слово").strip()
-        english_word = st.text_input("Перевод на английский язык").strip()
+        russian_word = st.text_input(
+            "Русское слово", key="new_russian"
+        ).strip()
+        english_word = st.text_input(
+            "Перевод на английский язык", key="new_english"
+        ).strip()
         is_submitted = st.form_submit_button("Добавить")
 
-    user_id = st.session_state.user_id
-
     if is_submitted:
-        if russian_word and english_word:
-            success = add_personal_word(user_id, russian_word, english_word)
-            if success is True:
-                st.success(f"✅ Слово '{russian_word}' и его перевод "
-                           f"'{english_word}' добавлены в ваш словарь!")
-            elif success is False:
-                st.error(f"Слово '{russian_word}' уже есть в вашем словаре.")
-            else:
-                st.error("Произошла непредвиденная ошибка "
-                         "при добавлении слова. Попробуйте еще раз.")
-        else:
+        if not russian_word or not english_word:
             st.warning("⚠️ Пожалуйста, заполните оба поля перед добавлением.")
-
-        if st.button("Добавить еще слово"):
-            st.rerun()
+        else:
+            success = add_personal_word(
+                st.session_state.user_id, russian_word, english_word
+            )
+            if success is True:
+                st.session_state.add_success_msg = (
+                    f"✅ Слово **{russian_word}** "
+                    f"→ **{english_word}** добавлено!"
+                )
+                st.session_state.clear_add_form = True
+                st.rerun()
+            elif success is False:
+                st.session_state.add_error_msg = (
+                    f"❌ Слово **{russian_word}** уже есть в вашем словаре."
+                )
+                st.session_state.clear_add_form = True
+                st.rerun()
+            else:
+                st.session_state.add_error_msg = \
+                    "⚠️ Произошла непредвиденная ошибка."
+                st.rerun()
 
 
 # Страница удаления слова
-def render_delete_word_tab(words):
+def render_delete_word_tab():
     """
     TODO: Реализовать вкладку удаления слова
     - Выпадающий список с персональными словами пользователя
     - Кнопка удаления
     - Подтверждение удаления
     """
+    user_id = st.session_state.user_id
+    words = get_personal_words(user_id)
 
     if 'show_confirm' not in st.session_state:
         st.session_state.show_confirm = False
@@ -244,6 +287,18 @@ def render_delete_word_tab(words):
     if 'delete_in_progress' not in st.session_state:
         st.session_state.delete_in_progress = False
     if 'delete_error' not in st.session_state:
+        st.session_state.delete_error = None
+    if 'success_message' not in st.session_state:
+        st.session_state.success_message = None
+
+    # Отображение успешного сообщения, если есть
+    if st.session_state.success_message:
+        st.success(st.session_state.success_message)
+        st.session_state.success_message = None
+
+    # Отображение ошибки, если есть
+    if st.session_state.delete_error:
+        st.error(st.session_state.delete_error)
         st.session_state.delete_error = None
 
     st.info("Вы можете 🗑️ удалить любое слово, которое ранее добавили.")
@@ -254,8 +309,7 @@ def render_delete_word_tab(words):
 
     word_options = {f"{word['russian_word']} (ID: {word['id']})":
                     word for word in words}
-
-    widget_key = f"delete_select_{hash(frozenset([w['id'] for w in words]))}"
+    widget_key = "_".join(sorted(str(w['id']) for w in words))
 
     selected_option = st.selectbox(
         "Выберите слово из выпадающего списка",
@@ -271,7 +325,6 @@ def render_delete_word_tab(words):
     if delete_button_visible and st.button("Удалить выбранное слово"):
         st.session_state.word_to_delete = word_options[selected_option]
         st.session_state.show_confirm = True
-        st.rerun()
 
     if (st.session_state.show_confirm
             and not st.session_state.delete_in_progress):
@@ -279,6 +332,7 @@ def render_delete_word_tab(words):
             f"Вы собираетесь удалить слово: "
             f"**{st.session_state.word_to_delete['russian_word']}**. "
             f"Это действие необратимо.")
+
         if st.button("Подтвердить удаление"):
             st.session_state.delete_in_progress = True
             st.rerun()
@@ -299,21 +353,17 @@ def render_delete_word_tab(words):
                 word_id = st.session_state.word_to_delete['id']
                 success = delete_personal_word(user_id, word_id)
                 if success:
-                    st.success("Слово успешно удалено!")
-                    print("Слово успешно удалено!")
-
-                    st.session_state.show_confirm = False
-                    st.session_state.word_to_delete = None
-                    st.session_state.delete_in_progress = False
-                    if st.button("Перейти к списку слов"):
-                        st.rerun()
+                    st.session_state.success_message = "Слово успешно удалено!"
                 else:
                     raise Exception("Функция удаления вернула False. "
                                     "Не удалось выполнить операцию.")
             except Exception as e:
                 st.error(f"Произошла ошибка при удалении: {e}")
-                st.session_state.delete_error = str(e)
+            finally:
+                st.session_state.show_confirm = False
+                st.session_state.word_to_delete = None
                 st.session_state.delete_in_progress = False
+            st.rerun()
 
 
 # Страница статистики
@@ -400,13 +450,3 @@ def render_statistics_tab(user_id):
     else:
         st.info("Пока нет данных о попытках. "
                 "Начните обучение, чтобы увидеть здесь свою историю!")
-
-
-if st.button("Показать схему базы данных"):
-    st.info("Загрузка схемы... Подождите.")
-    try:
-        schema_text = capture_render_schema()
-        st.code(schema_text, language='text')
-        st.success("Готово!")
-    except Exception as e:
-        st.error(f"Произошла ошибка: {e}")

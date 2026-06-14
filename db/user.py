@@ -54,12 +54,16 @@ def get_user_words(user_id):
     cur = conn.cursor()
     try:
         cur.execute("""
-            SELECT id, russian_word, english_word, 'common' AS word_type
-            FROM common_words
-            UNION ALL
-            SELECT id, russian_word, english_word, 'personal' AS word_type
-            FROM user_words
-            WHERE user_id = %s;
+            SELECT id, russian_word, english_word, word_type FROM (
+                SELECT id, russian_word, english_word, 'common' AS word_type
+                FROM common_words
+                UNION ALL
+                SELECT id, russian_word, english_word, 'personal' AS word_type
+                FROM user_words
+                WHERE user_id = %s
+            ) AS combined_words
+            ORDER BY RANDOM()
+            LIMIT 4;
         """, (user_id,))
         rows = cur.fetchall()
         word_list = []
