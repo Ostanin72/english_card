@@ -1,7 +1,10 @@
 from db.init_db import get_db_connection
 from tabulate import tabulate
 
+from utils.decorators import logger
 
+
+@logger('connect.log')
 def login_user(username):
     """
     TODO: Реализовать вход пользователя
